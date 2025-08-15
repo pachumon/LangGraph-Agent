@@ -1,0 +1,10 @@
+  graph TD
+      A[START] --> B[session_start_node]
+      B --> C[question_classifier_node]
+      C --> D{Route Question}
+
+      D -->|geography| E[geography_agent_node]
+      D -->|other| F[default_responder_node]
+
+      E --> G[END]
+      F --> G
