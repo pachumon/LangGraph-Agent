@@ -56,17 +56,28 @@ class AgentService:
         session_id = state.get("session_id", "")
         current_time = time.time()
         
-        # Initialize conversation history if not present
+        # Initialize conversation history if this is the first call (not in checkpointer)
         if "conversation_history" not in state:
             state["conversation_history"] = []
+            state["created_at"] = current_time
+            logger.info(f"Initialized new session state for {session_id}")
+        else:
+            # Validate conversation_history structure
+            conversation_history = state.get("conversation_history", [])
+            if not isinstance(conversation_history, list):
+                logger.warning(f"Invalid conversation_history type for session {session_id}, resetting")
+                state["conversation_history"] = []
+            else:
+                logger.debug(f"Retrieved existing session state for {session_id} with {len(conversation_history)} messages")
         
-        # Update timestamps
+        # Ensure created_at exists (fallback for legacy sessions)
         if "created_at" not in state:
             state["created_at"] = current_time
+            logger.debug(f"Added missing created_at timestamp for session {session_id}")
         
+        # Always update last activity
         state["last_activity"] = current_time
         
-        logger.debug(f"Session {session_id} initialized/validated")
         return state
     
     def _conversation_agent_node(self, state: Dict[str, Any]) -> Dict[str, Any]:
@@ -75,17 +86,23 @@ class AgentService:
         conversation_history = state.get("conversation_history", [])
         session_id = state.get("session_id", "unknown")
         
-        logger.info(f"Processing query for session {session_id}: {current_query[:50]}...")
+        logger.info(f"Processing query for session {session_id} (history: {len(conversation_history)} messages): {current_query[:50]}...")
         
         # Build context from conversation history
         messages = []
         
         # Add conversation history as context
         for msg in conversation_history:
+            if not isinstance(msg, dict) or "role" not in msg or "content" not in msg:
+                logger.warning(f"Skipping invalid message in history for session {session_id}: {msg}")
+                continue
+                
             if msg["role"] == "user":
                 messages.append(HumanMessage(content=msg["content"]))
             elif msg["role"] == "assistant":
                 messages.append(AIMessage(content=msg["content"]))
+            else:
+                logger.warning(f"Unknown role '{msg['role']}' in conversation history for session {session_id}")
         
         # Add current query
         messages.append(HumanMessage(content=current_query))
@@ -162,19 +179,26 @@ class AgentService:
         
         # Get the compiled graph for this session
         app = self._get_compiled_graph(session_id)
+        config = {"configurable": {"thread_id": session_id}}
         
-        # Prepare initial state
+        # Get existing state from checkpointer (if any)
+        try:
+            current_state = app.get_state(config)
+            existing_state = current_state.values if current_state and current_state.values else {}
+            logger.info(f"Retrieved existing state for session {session_id}: {list(existing_state.keys())}")
+        except Exception as e:
+            logger.warning(f"Could not retrieve existing state for session {session_id}: {e}")
+            existing_state = {}
+        
+        # Merge existing state with new request data
         initial_state = {
+            **existing_state,  # Start with existing state
             "session_id": session_id,
             "current_query": user_query,
-            "response": "",
-            "conversation_history": [],
-            "created_at": session.created_at,
-            "last_activity": time.time()
+            "response": ""  # Reset response for new query
         }
         
-        # Execute the workflow with session-specific thread
-        config = {"configurable": {"thread_id": session_id}}
+        logger.info(f"Initial state for session {session_id}: conversation_history length = {len(initial_state.get('conversation_history', []))}")
         
         try:
             result = app.invoke(initial_state, config=config)
@@ -185,7 +209,9 @@ class AgentService:
             
             processing_time = time.time() - start_time
             
-            logger.info(f"Query processed in {processing_time:.2f}s for session {session_id}")
+            # Log successful processing with context info
+            conversation_length = len(result.get("conversation_history", []))
+            logger.info(f"Query processed in {processing_time:.2f}s for session {session_id}, conversation now has {conversation_length} messages")
             
             return {
                 "session_id": session_id,
